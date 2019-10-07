@@ -1,11 +1,12 @@
 # quickrl
 ## A reinforcement learning framework built with modularity as the core concept.
 
-What's inside:
+**What's inside:**
 - the framework's files are stored in the `./quickrl` directory
 - tests and examples of the framework put to use can be found in the `./tests_quickrl` directory.
 
-How to use:
+**How to use:**
+
 This framework is built with ease of use, generality and modularity in mind. At the moment this is achieved at the expense of performance, since all tasks are executed sequencially (no concurrent processes), and by the processor(s). This framework, although it is built using PyTorch, does not make any use of the graphics card.
 
 Ideally you won't have to implement any function to make the agent learn in a new environment. You'll just have to *build* the agent giving it the parts already available in the framework. Some of these parts are typical of any RL agent, while others are characteristic of this framework. Here I present a scheme of the typical `quickrl` agent, folowed by a list in which I'll go into more detail.
