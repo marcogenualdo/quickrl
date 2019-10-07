@@ -16,7 +16,12 @@ Ideally you won't have to implement any function to make the agent learn in a ne
 - two *interaction functions: `step` and `reset`*. These come into play every time the agent has to take a step in the environment, or reset the game. They allow a standard code of communication between an arbitrary game environment and the agent parts.
 - a *logger*. A Python class that records important information the user may want to keep track of, such as the total reward over each episode or the total number of game losses.
 
-![quickrl_agent_scheme](/images/agent_scheme.jpeg)
+![quickrl_agent_scheme](/images/agent_scheme.jpg)
 Format: ![Alt Text](url)
 
 Each one of these parts can be implemented by the user, if none of the already implemented ones seem fit for the task.
+The agent interaction scheme is based upon the OpenAI Gym environments, since thoe are the ones I used to benchmark the performances of the learning algorithms. The algorithms I implemented so far are classics of the RL literature, namely:
+- Deep Q-Network, associated with random or prioritized search through memory.
+- n-SARSA with arbitrary n, also associated with random or prioritized recall.
+- Actor critic (typically using a neural network for the policy and a linear classifier for the value function).
+- Reinforce
