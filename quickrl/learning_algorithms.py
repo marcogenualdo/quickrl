@@ -1,9 +1,60 @@
 from collections import deque
 from copy import copy
+from itertools import cycle
 import torch
 from torch import nn
 
 from .policies import MaxValue
+
+
+def n_td_step (agent, paths, n=1):
+    """
+    Updates agent.V (value function) based on transitions contained in 'paths'.
+    'paths' is a list of transitions of length n+1.
+
+    Taking these paths, the function builds a vector of all the initial states (old_states) and last states (new_states)
+    and a matrix of rewards where rewards(i,j) is the reward given at the j-th step of transition i.
+    the vector of total predicted rewards is then
+
+        target = rewards * d + gamma ^ n * value(new_states)
+
+    where d = (1, gamma, gamma ^ 2, ..., gamma ^ (n-1)) is the discount vector.
+    The values of new states are masked, i.e. multiplied by a 0-1 vector 'mask' which is 0 if the episode finishes before n steps,
+    that is len(path(i)) < n.
+    """
+
+    if not paths: return
+    if not isinstance(paths[0], list): paths = [paths]
+   
+    # transposing memory
+    discount = torch.tensor([agent.gamma ** k for k in range(n)])
+    old_states, new_states = [], []
+    rewards, mask = [], []
+
+    for path in paths:
+        old_states.append(path[0].state)
+        new_states.append(path[-1].state)
+
+        l = 1 if len(path) == 1 else len(path) - 1
+        mask.append(1. if len(path) == n+1 else 0.)
+
+        rewards.append(torch.cat(
+            [event.reward for event in path[:l]] 
+            + [torch.zeros(n - l)]
+        ))
+    
+    old_states = torch.stack(old_states)
+    new_states = torch.stack(new_states)
+    rewards = torch.stack(rewards)
+
+    # biulding target = R * d + gamma^n * masked(V)
+    with torch.no_grad():
+        mask = agent.gamma ** n * torch.tensor(mask)
+        targets = torch.mv(rewards, discount) + mask * agent.target_V(new_states)
+
+    # updating value function
+    loss = agent.V.update(old_states, targets)
+    return loss
 
 
 def sarsa_lambda_reset (agent):
@@ -60,20 +111,59 @@ def sarsa_lambda (agent, lb = 0.8, episodes = 1000, epsilon_schedule=None):
 
 
 def n_sarsa_step (agent, paths, n=1):
-    if agent.memory.data[-1].step < n: return None
+    """
+    Updates agent.Q (action-value function) based on transitions contained in 'paths'.
+    'paths' is a list of transitions of length n+1.
 
-    path = agent.memory.get_last(n)
-    old_state, old_action = path[0].state, path[0].action
+    Taking these paths, the function builds a vector of all the initial states, actions (old_states, old_actions), last states, actions, (new_states, new_actions) and a matrix of rewards where rewards(i,j) is the reward given at the j-th step of transition i.
+    The vector of total predicted rewards is then
 
+        target = rewards * d + gamma ^ n * value(new_states, new_actions)
+
+    where d = (1, gamma, gamma ^ 2, ..., gamma ^ (n-1)) is the discount vector.
+    The values of new states are masked, i.e. multiplied by a 0-1 vector 'mask' which is 0 if the episode finishes before n steps,
+    that is len(path(i)) < n.
+    """
+
+    if not paths: return torch.empty(0)
+    if not isinstance(paths[0], list): paths = [paths]
+   
+    # transposing paths
+    discount = torch.tensor([agent.gamma ** k for k in range(n)])
+    old_states, old_actions, new_states, new_actions = [], [], [], []
+    rewards, mask = [], []
+
+    for path in paths:
+        old_states.append(path[0].state)
+        old_actions.append(path[0].action)
+        new_states.append(path[-1].state)
+        new_actions.append(path[-1].action)
+
+        l = 1 if len(path) == 1 else len(path) - 1
+        mask.append(1. if len(path) == n+1 else 0.)
+
+        rewards.append(torch.cat(
+            [event.reward for event in path[:l]] 
+            + [torch.zeros(n - l)]
+        ))
+   
+    old_states = torch.stack(old_states).squeeze()
+    old_actions = torch.cat(old_actions).squeeze()
+    new_states = torch.stack(new_states).squeeze()
+    new_actions = torch.cat(new_actions).squeeze()
+    rewards = torch.stack(rewards)
+
+    # building target vector
     with torch.no_grad():
-        rewards = [e.reward for e in path] + [agent.Q(state, action)]
-        gain = torch.tensor([r * agent.gamma ** k for k,r in enumerate(rewards)]).sum()
+        mask = agent.gamma ** n * torch.tensor(mask)
+        targets = torch.mv(rewards, discount) + mask * agent.target_Q(new_states, new_actions)
 
-    loss = agent.Q.update(old_state, old_action, gain)
-    return loss
+    # updating value function
+    losses = agent.Q.update(old_states, old_actions, targets)
+    return losses
 
 
-def n_sarsa (agent, n = 1, episodes = 1000, epsilon_schedule=None):
+def n_sarsa (agent, n = 1, episodes = 1000, epsilon_schedule=None, frames_to_skip=0):
     assert agent.Q is not None, "n-sarsa requires the agent to have a Q-function"
     assert isinstance(agent.policy, MaxValue), "n-sarsa requires the agent to have a 'MaxValue' type policy"
 
@@ -89,7 +179,7 @@ def n_sarsa (agent, n = 1, episodes = 1000, epsilon_schedule=None):
         
         done = False 
         while not done:
-            state, reward, done, info = agent.step(action)
+            state, reward, done, info = agent.step(action, frames_to_skip)
             action = agent.epsilon_greedy_action(eps)
 
             with torch.no_grad():
@@ -102,7 +192,58 @@ def n_sarsa (agent, n = 1, episodes = 1000, epsilon_schedule=None):
             path.append((state, action, reward))
 
 
-def actor_critic (agent, episodes, epsilon_schedule):
+def q_step (agent, paths, n=1):
+    """
+    Updates agent.Q (action-value function) based on transitions contained in 'paths'.
+    'paths' is a list of transitions of length n+1.
+
+    Taking these paths, the function builds a vector of all the initial states, actions (old_states, old_actions), last states, actions, (new_states, new_actions) and a matrix of rewards where rewards(i,j) is the reward given at the j-th step of transition i.
+    The vector of total predicted rewards is then
+
+        target = rewards * d + gamma ^ n * qvalue(new_states)
+
+    where d = (1, gamma, gamma ^ 2, ..., gamma ^ (n-1)) is the discount vector.
+    The values of new states are masked, i.e. multiplied by a 0-1 vector 'mask' which is 0 if the episode finishes before n steps,
+    that is len(path(i)) < n, and 1 otherwise.
+    """
+    
+    if not paths: return []
+    if not isinstance(paths[0], list): paths = [paths]
+   
+    # transposing paths
+    discount = torch.tensor([agent.gamma ** k for k in range(n)])
+    old_states, old_actions, new_states = [], [], []
+    rewards, mask = [], []
+
+    for path in paths:
+        old_states.append(path[0].state)
+        old_actions.append(path[0].action)
+        new_states.append(path[-1].state)
+
+        l = 1 if len(path) == 1 else len(path) - 1
+        mask.append(1. if len(path) == n+1 else 0.)
+
+        rewards.append(torch.cat(
+            [event.reward for event in path[:l]] 
+            + [torch.zeros(n - l)]
+        ))
+    
+    old_states = torch.stack(old_states)
+    old_actions = torch.cat(old_actions)
+    new_states = torch.stack(new_states)
+    rewards = torch.stack(rewards)
+
+    # building target vector
+    with torch.no_grad():
+        mask = agent.gamma ** n * torch.tensor(mask)
+        targets = torch.mv(rewards, discount) + mask * agent.target_Q(new_states).max(1)[0]
+
+    # updating value function
+    losses = agent.Q.update(old_states, old_actions, targets)
+    return losses
+
+
+def actor_critic (agent, episodes, epsilon_schedule, frames_to_skip=0):
     assert agent.V is not None, "actor-critic requires the agent to have a V-function"
     assert agent.policy is not None, "actor-critic requires the agent to have a policy"
     
@@ -117,7 +258,7 @@ def actor_critic (agent, episodes, epsilon_schedule):
         while not done:
             # interaction with the environemnt
             action = agent.epsilon_greedy_action(eps)
-            state, reward, done, info = agent.step(action)
+            state, reward, done, info = agent.step(action, frames_to_skip)
 
             # updating value weights
             target = reward + agent.gamma * agent.V(state)
@@ -136,37 +277,28 @@ def uniform_memory_sample (
     batch_size, 
     update_time,
     episodes, 
-    epsilon_schedule
+    epsilon_schedule,
+    transition_length=2,
+    frames_to_skip=0
 ):
-    assert agent.Q is not None, "uniform_ememory_sample requires the agent to have a Q-function"
+    assert agent.Q is not None, "uniform_memory_sample requires the agent to have a Q-function"
     assert isinstance(agent.policy, MaxValue), "uniform_memory_sample requires the agent to have a 'MaxValue' type policy"
 
-    t = 0
+    update_cycle = cycle(range(update_time)) 
     for episode in range(episodes):
         eps = epsilon_schedule(episode, episodes)
         state = agent.reset()
 
         done = False
         while not done: 
-            if not t % update_time: agent.target_Q = copy(agent.Q)
-            t += 1
+            if not next(update_cycle): agent.target_Q = copy(agent.Q)
 
             action = agent.epsilon_greedy_action(eps)
-            state, reward, done, info = agent.step(action)
+            state, reward, done, info = agent.step(action, frames_to_skip)
 
-            old, new = agent.memory.sample_transitions(batch_size)
-            if old and new:
-                with torch.no_grad():
-                    old_states = torch.stack([e.state for e in old])
-                    old_actions = torch.LongTensor([e.action for e in old])
-                    new_states = torch.stack([e.state for e in new])
-                    new_actions = torch.LongTensor([e.action for e in new])
-
-                    mask = torch.tensor([1. if o.episode == n.episode else 0. for o,n in zip(old, new) ])
-                    values = agent.target_Q(new_states, new_actions)
-                    targets = torch.cat([e.reward for e in old]) + agent.gamma * values * mask
-
-                agent.Q.update(old_states, old_actions, targets)
+            paths = agent.memory.sample_transitions(batch_size, transition_length)
+            #n_sarsa_step(agent, paths, transition_length - 1)
+            q_step(agent, paths, transition_length - 1)
 
 
 def prioritized_memory_sample (
@@ -174,11 +306,13 @@ def prioritized_memory_sample (
     batch_size, 
     update_time,
     episodes, 
-    epsilon_schedule
+    epsilon_schedule,
+    transition_length=2,
+    frames_to_skip=0
 ):
     assert agent.Q.loss_func.reduction == 'none', "prioritized_memory_sample requires agent.Q.loss_func to have 'none' reduction"
 
-    t = 0
+    update_cycle = cycle(range(update_time))
     for episode in range(episodes):
         eps = epsilon_schedule(episode, episodes)
         state = agent.reset()
@@ -186,37 +320,22 @@ def prioritized_memory_sample (
 
         done = False
         while not done: 
-            if not t % update_time: agent.target_Q = copy(agent.Q)
-            t += 1
+            if not next(update_cycle): agent.target_Q = copy(agent.Q)
 
-            state, reward, done, info = agent.step(action)
+            # real experience
+            state, reward, done, info = agent.step(action, frames_to_skip)
             action = agent.epsilon_greedy_action(eps)
 
-            loss = n_sarsa_step(agent, state, action)
-            if loss is not None:
-                agent.memory.push(
-                    [agent.memory.data[-1]],
-                    [agent.memory.event(
-                        agent.memory.current_episode,
-                        agent.memory.current_step,
-                        state,
-                        action,
-                        None)],
-                    [loss]
-                )
+            last_event = agent.memory.event(0, 0, state, action, None) 
+            last_path = [agent.memory.data[-1], last_event]
+            loss = n_sarsa_step(agent, last_path)
+            agent.memory.push(loss.item())
 
-            #print(agent.memory.queue)
-            old_events, new_events = agent.memory.pop(batch_size)
-            if old_events and new_events:
-                with torch.no_grad():
-                    old_states = torch.stack([e.state for e in old_events])
-                    old_actions = torch.LongTensor([e.action for e in old_events])
-                    new_states = torch.stack([e.state for e in new_events])
-                    new_actions = torch.LongTensor([e.action for e in new_events])
+            # replaying past experiences
+            paths, indexes = agent.memory.sample_transitions(batch_size, transition_length)
 
-                    mask = torch.tensor([1. if o.episode == n.episode else 0. for o,n in zip(old_events, new_events)])
-                    values = agent.target_Q(new_states, new_actions)
-                    targets = torch.cat([e.reward for e in old_events]) + agent.gamma * mask * values
-                
-                losses = agent.Q.update(old_states, old_actions, targets)
-                agent.memory.push(old_events, new_events, losses)
+            #losses = n_sarsa_step(agent, paths, transition_length - 1)
+            losses = q_step(agent, paths, transition_length - 1)
+            
+            for loss, index in zip(losses, indexes):
+                agent.memory.update_priority(index, loss.item())
