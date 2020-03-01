@@ -24,7 +24,7 @@ class Network (nn.Module):
     def __init__(self):
         super(Network, self).__init__()
 
-        self.conv_ops = [
+        self.conv_ops = nn.Seqential(
             nn.Conv2d(in_channels=1, out_channels=8, kernel_size=5, stride=2),
             nn.BatchNorm2d(8),
             nn.ReLU(),
@@ -34,7 +34,7 @@ class Network (nn.Module):
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=2),
             nn.BatchNorm2d(32),
             nn.ReLU()
-        ]
+        )
         self.dense = nn.Linear(32*3, 2)
 
     
@@ -42,8 +42,7 @@ class Network (nn.Module):
         if len(x.shape) == 3: 
             x = x.unsqueeze(0)
 
-        for op in self.conv_ops:
-            x = op(x)
+        x = self.conv_ops(x)
         x = x.view(-1, 32*3)
         x = self.dense(x)
         
